@@ -1,0 +1,25 @@
+{
+  "name": "geo-web-monitor",
+  "version": "0.1.0",
+  "description": "Local GEO monitoring starter for AI web answers, visible sources and screenshots",
+  "license": "MIT",
+  "packageManager": "pnpm@11.19.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "doctor": "node scripts/check-env.mjs",
+    "media:demo": "node scripts/demo-media.mjs",
+    "export:public": "node scripts/export-public.mjs",
+    "check:public": "node scripts/check-public.mjs",
+    "demo": "node src/cli.js --platform demo --questions examples/questions.txt",
+    "start": "node src/server.js",
+    "backup": "node src/backup.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "playwright": "1.63.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

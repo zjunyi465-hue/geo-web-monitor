@@ -1,0 +1,28 @@
+name: Test
+
+permissions:
+  contents: read
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.19.0"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - name: Validate public package
+        shell: pwsh
+        run: |
+          node scripts/export-public.mjs
+          $package = (Get-ChildItem -LiteralPath release-preview -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+          node scripts/check-public.mjs $package

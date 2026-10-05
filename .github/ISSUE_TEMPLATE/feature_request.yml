@@ -1,0 +1,21 @@
+name: 功能建议 / Feature request
+description: 说明场景、目标和可验证的改善
+title: "[Feature] "
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 当前场景与问题
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 希望如何改善
+      description: 请区分本机基础款与服务器、内容发布等扩展需求
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: 如何判断功能有效

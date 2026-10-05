@@ -1,0 +1,54 @@
+name: 缺陷反馈 / Bug report
+description: 提交可复现的本地运行或网页采集问题
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: "请勿提交手机号、Cookie、密码、数据库或真实客户资料。截图需脱敏；安全漏洞不要公开细节，参阅 SECURITY.md。"
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      description: Windows、Node.js、Edge 及项目版本
+      placeholder: Windows 11 / Node.js 24 / Edge / v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题区域
+      options:
+        - 安装或启动
+        - 账号或登录
+        - 平台 A采集
+        - 平台 B 采集
+        - 任务与定时执行
+        - 报告或界面
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 使用虚构问题描述可重复步骤
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 脱敏错误及截图
+      description: 提供执行阶段与错误代码，不上传账号凭证或完整私有回答
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 隐私检查
+      options:
+        - label: 已检查内容，不含账号凭证或个人及客户资料
+          required: true
