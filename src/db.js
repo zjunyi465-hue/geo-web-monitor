@@ -1,3 +1,4 @@
+import {initializeTopicSequence} from './topics.js';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -5,7 +6,7 @@ import { dirname, resolve } from 'node:path';
 export function openDatabase(path = resolve('data', 'geo-monitor.db')) {
   mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+  db.exec('PRAGMA busy_timeout = 3000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec([
     'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, salt TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN (\'admin\',\'member\')), created_at TEXT NOT NULL);',
     'CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL);',
@@ -22,6 +23,10 @@ export function openDatabase(path = resolve('data', 'geo-monitor.db')) {
     'CREATE INDEX IF NOT EXISTS idx_results_run ON results(run_id);',
   ].join('\n'));
   db.exec('CREATE TABLE IF NOT EXISTS submission_checkpoints (run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE, question_id INTEGER NOT NULL REFERENCES questions(id), account_id INTEGER NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(run_id,question_id,account_id));');
+  db.exec("CREATE TABLE IF NOT EXISTS answer_reviews (result_id INTEGER PRIMARY KEY REFERENCES results(id) ON DELETE CASCADE,answer_revision TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('pending','accurate','inaccurate','outdated','uncertain')),notes TEXT NOT NULL DEFAULT '',excerpt_start INTEGER,excerpt_end INTEGER,excerpt_text TEXT,reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,updated_at TEXT NOT NULL);");
+  db.exec("CREATE TABLE IF NOT EXISTS source_annotations (brand_id INTEGER NOT NULL REFERENCES brands(id) ON DELETE CASCADE,url TEXT NOT NULL,category TEXT NOT NULL DEFAULT 'unclassified' CHECK(category IN ('unclassified','owned','third_party','competitor','verify')),favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)),notes TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL,PRIMARY KEY(brand_id,url));");
+  db.exec("CREATE TABLE IF NOT EXISTS question_topics (id INTEGER PRIMARY KEY,brand_id INTEGER NOT NULL REFERENCES brands(id) ON DELETE CASCADE,name TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(brand_id,name)); CREATE TABLE IF NOT EXISTS topic_questions (topic_id INTEGER NOT NULL REFERENCES question_topics(id) ON DELETE CASCADE,question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,PRIMARY KEY(topic_id,question_id));");
+  for(const column of ['topic_ids_json','topic_snapshot_json'])if(!db.prepare('PRAGMA table_info(tasks)').all().some(c=>c.name===column))db.exec('ALTER TABLE tasks ADD COLUMN '+column+" TEXT NOT NULL DEFAULT '[]'");
   if (!db.prepare('PRAGMA table_info(runs)').all().some(column => column.name === 'brand_snapshot_json')) {
     db.exec('ALTER TABLE runs ADD COLUMN brand_snapshot_json TEXT');
   }
@@ -48,6 +53,7 @@ export function openDatabase(path = resolve('data', 'geo-monitor.db')) {
       SELECT 1 FROM result_attempts a WHERE a.run_id=r.run_id AND a.question_id=r.question_id AND a.platform=r.platform
         AND a.account_id IS r.account_id AND a.started_at=r.started_at AND a.finished_at=r.finished_at)`);
   const accountColumns = db.prepare('PRAGMA table_info(platform_accounts)').all().map(column => column.name);
+  if (!accountColumns.includes('login_check_json')) db.exec('ALTER TABLE platform_accounts ADD COLUMN login_check_json TEXT');
   if (!accountColumns.includes('notes')) db.exec("ALTER TABLE platform_accounts ADD COLUMN notes TEXT NOT NULL DEFAULT ''");
   if (!accountColumns.includes('last_status')) db.exec("ALTER TABLE platform_accounts ADD COLUMN last_status TEXT NOT NULL DEFAULT 'unknown'");
   if (!accountColumns.includes('last_error')) db.exec('ALTER TABLE platform_accounts ADD COLUMN last_error TEXT');
@@ -56,5 +62,8 @@ export function openDatabase(path = resolve('data', 'geo-monitor.db')) {
   for (const platform of ['doubao', 'deepseek']) {
     seed.run(platform, '默认账号', 'legacy-' + platform, new Date().toISOString());
   }
+  db.exec("CREATE TABLE IF NOT EXISTS institution_reviews (brand_id INTEGER NOT NULL REFERENCES brands(id) ON DELETE CASCADE,name_key TEXT NOT NULL,name TEXT NOT NULL,category TEXT NOT NULL DEFAULT 'pending' CHECK(category IN ('pending','peer','ignore','wrong')),merge_into TEXT,notes TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL,PRIMARY KEY(brand_id,name_key));");
+  db.exec("CREATE TABLE IF NOT EXISTS change_annotations (brand_id INTEGER NOT NULL REFERENCES brands(id) ON DELETE CASCADE,event_key TEXT NOT NULL,before_result_id INTEGER NOT NULL REFERENCES results(id) ON DELETE CASCADE,after_result_id INTEGER NOT NULL REFERENCES results(id) ON DELETE CASCADE,status TEXT NOT NULL CHECK(status IN ('new','seen','watch')),reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,updated_at TEXT NOT NULL,PRIMARY KEY(brand_id,event_key));");
+  initializeTopicSequence(db);
   return db;
 }

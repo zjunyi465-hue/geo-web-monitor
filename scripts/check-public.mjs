@@ -13,7 +13,7 @@ async function inspect(directory) {
     const path = join(directory, entry.name);
     const name = relative(root, path).replaceAll('\\', '/');
     if ((await lstat(path)).isSymbolicLink()) throw new Error('Symlink not allowed: ' + name);
-    if (/(^|\/)(\.git|node_modules|profiles|data|results|backups)(\/|$)|(^|\/)\.env(?:\.|$)|\.db(?:-|$)|\.sqlite(?:-|$)|server-.*\.log$/.test(name)) {
+    if (/(^|\/)(\.git|node_modules|profiles|data|results|backups|work|release-preview|\.codex|\.agents|\.aws|\.ssh)(\/|$)|(^|\/)\.env(?:\.|$)|(^|\/)PROJECT_MEMORY\.md$|\.db(?:-|$)|\.sqlite(?:-|$)|\.log$|codex-clipboard/i.test(name)) {
       throw new Error('Runtime or private file in export: ' + name);
     }
     if (entry.isDirectory()) { await inspect(path); continue; }

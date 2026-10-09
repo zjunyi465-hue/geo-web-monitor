@@ -9,7 +9,8 @@ const entries = ['README.md', 'LICENSE', 'CONTRIBUTING.md', 'SECURITY.md', '.git
   'CHANGELOG.md', '.editorconfig', '.gitattributes',
   'src', 'public', 'test', 'scripts', '.github', 'examples',
   'docs/README.en.md', 'docs/quickstart.md', 'docs/privacy.md', 'docs/troubleshooting.md', 'docs/architecture.md',
-  'docs/how-it-works.md', 'docs/roadmap.md', 'docs/demo.md', 'docs/sharing.md', 'docs/releasing.md', 'docs/validation.md', 'docs/assets'];
+  'docs/how-it-works.md', 'docs/roadmap.md', 'docs/demo.md', 'docs/sharing.md', 'docs/releasing.md', 'docs/validation.md',
+  'docs/analytics-report.md', 'docs/account-login-check.md', 'docs/retry-behavior.md', 'docs/source-library.md', 'docs/question-topics.md', 'docs/institution-discovery.md', 'docs/answer-review.md', 'docs/change-feed.md', 'docs/answer-search.md', 'docs/assets'];
 await mkdir(target, { recursive: true });
 for (const entry of entries) {
   await mkdir(dirname(join(target, entry)), { recursive: true });
@@ -20,6 +21,14 @@ for (const entry of entries) {
       return true;
     } });
 }
+// Keep the public display labels generic; adapter IDs, URLs and selectors remain
+// unchanged so the exported program stays runnable and auditable.
+const browserPath = join(target, 'src', 'browser.js');
+const browserSource = await readFile(browserPath, 'utf8');
+const publicBrowser = browserSource.replace("label: '豆包网页版'", "label: '平台 A'")
+  .replace("label: 'DeepSeek 网页版'", "label: '平台 B'");
+if (!publicBrowser.includes("label: '平台 A'") || !publicBrowser.includes("label: '平台 B'")) throw new Error('Public platform display labels were not applied; review adapter configuration.');
+await writeFile(browserPath, publicBrowser);
 const manifest = [];
 async function inspect(folder) {
   for (const entry of await readdir(folder, { withFileTypes: true })) {

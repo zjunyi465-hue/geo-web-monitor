@@ -25,9 +25,9 @@ test('人工验证和重启后恢复原回答，不重复发送；问题不匹�
       '<button data-testid="chat_input_send_button">发送</button><div data-testid="union_message"><div data-testid="receive_message">' +
       '<div data-testid="message_text_content" id="answer"></div></div><div data-testid="message_action_bar" style="height:20px"></div></div>' +
       '<script>let pending=false;document.querySelector("[data-testid=chat_input_send_button]").onclick=async()=>{' +
-      'await fetch("/send");history.pushState({},"","/chat/original");pending=true;document.querySelector("[data-testid=union_message]").insertAdjacentHTML("beforebegin","<p>测试验证</p>");document.body.insertAdjacentHTML("beforeend","<div id=challenge>请选择所有符合上述描述的图片</div>");};' +
+      'await fetch("/send");history.pushState({},"","/chat/local_temporary");pending=true;document.querySelector("[data-testid=union_message]").insertAdjacentHTML("beforebegin","<p>测试验证</p>");document.body.insertAdjacentHTML("beforeend","<div id=challenge>请选择所有符合上述描述的图片</div>");};' +
       'setInterval(async()=>{const s=await(await fetch("/state")).json();' +
-      'if(pending&&s.verified){pending=false;document.querySelector("#challenge").remove();document.querySelector(".tiptap").innerText="";' +
+      'if(pending&&s.verified){pending=false;history.replaceState({},"","/chat/original");document.querySelector("#challenge").remove();document.querySelector(".tiptap").innerText="";' +
       'document.querySelector("#answer").textContent="原问题回答";const a=document.createElement("a");a.href="https://example.org/evidence";a.textContent="参考资料";document.querySelector("#answer").append(" ",a);}},200);</script>');
   });
   await new Promise(done => fixture.listen(0, '127.0.0.1', done));
@@ -47,18 +47,27 @@ test('人工验证和重启后恢复原回答，不重复发送；问题不匹�
     });
     assert.equal(persisted.mayHaveSubmitted, true);
     assert.equal(persisted.pageUrl, checkpoint.pageUrl);
+    assert.equal(checkpoint.monitorConditions.version,1);
     verified = true;
     await new Promise(done => setTimeout(done, 800));
-    const answer = await askBrowser({ ...job, resumeState: checkpoint }, { runId: 1 });
+    assert.match(checkpoint.pageUrl, /local_temporary$/);
+    const answer = await askBrowser({ ...job, resumeState: checkpoint }, { runId: 1, onCheckpoint: state => { persisted = state; } });
     assert.equal(answer.text, '原问题回答 参考资料');
     assert.equal(answer.citations.length, 1);
     assert.equal(answer.diagnostics.resumedOriginal, true);
+    assert.deepEqual(answer.diagnostics.monitorConditions,checkpoint.monitorConditions,'恢复不得重写原发送条件');
     assert.equal(sends, 1);
     assert.equal(navigations, 1);
+    assert.match(persisted.pageUrl, /\/chat\/original$/, '临时地址升级后的真实地址必须保存，不应重新打开临时地址');
     await closeBrowsers();
     const restored = await askBrowser({ ...job, resumeState: persisted }, { runId: 1 });
     assert.equal(restored.text, '原问题回答 参考资料');
     assert.equal(sends, 1);
+    await closeBrowsers();
+    const beforeTemporaryRestore = navigations;
+    await assert.rejects(askBrowser({ ...job, resumeState: { ...persisted, pageUrl: PLATFORMS.doubao.url + '/chat/local_missing' } }, { runId: 1 }),
+      error => error.code === 'RESUME_CONTEXT_LOST');
+    assert.equal(navigations, beforeTemporaryRestore, '临时地址不可当作可恢复历史地址导航');
     assert.equal(navigations, 2);
     await closeBrowsers();
     followup = true;

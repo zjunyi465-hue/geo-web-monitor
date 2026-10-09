@@ -34,6 +34,9 @@ test('豆包只重试明确未提交的系统异常，已提交的问题不重�
     const job = { platform: 'doubao', question_id: 1, question: '重试测试' };
     const answer = await askBrowser(job, { runId: 1, onAttempt: a => attempts.push(a) });
     assert.match(answer.text, /回答：重试测试/);
+    assert.equal(answer.diagnostics.monitorConditions.version,1);
+    assert.equal(answer.diagnostics.monitorConditions.search.value,null);
+    assert.ok(answer.diagnostics.conditionsAfter.capturedAt);
     assert.equal(sends, 2);
     assert.equal(attempts.length, 1);
     assert.equal(attempts[0].errorCode, 'PROVIDER_ERROR');

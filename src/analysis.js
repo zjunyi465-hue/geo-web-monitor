@@ -1,14 +1,12 @@
 import { domainToASCII } from 'node:url';
+import {brandMatches} from './brand-evidence.js';
 
 function normalized(text) {
   return String(text ?? '').toLocaleLowerCase().replace(/\s+/g, '');
 }
 
 export function brandMentioned(answer, brand) {
-  const names = [brand.name, ...String(brand.aliases ?? '').split(/[,，、\n]/)]
-    .map(normalized).filter(Boolean);
-  const haystack = normalized(answer);
-  return names.some(name => haystack.includes(name));
+  return brandMatches(answer,brand).length>0;
 }
 
 export function sentimentGuess(answer, brand) {
@@ -36,13 +34,18 @@ export function citationHost(url) {
 
 export function summarizeRun({ brand, questions, results, totalExpected = results.length }) {
   const byId = new Map(questions.map(q => [Number(q.id), q]));
-  const successful = results.filter(r => r.status === 'succeeded');
+  const slot=r=>JSON.stringify([r.question_id,r.platform,r.account_id]);
+  const counts=new Map();
+  for(const r of results) if(r.account_id) counts.set(slot(r),(counts.get(slot(r))||0)+1);
+  const usable=r=>Boolean(String(r.answer||'').trim())&&(!r.account_id||counts.get(slot(r))===1);
+  const invalid = results.filter(r => r.status === 'succeeded' && !usable(r)).length;
+  const successful = results.filter(r => r.status === 'succeeded' && usable(r));
   const citationGaps = successful.filter(r => Number.isInteger(r.reported_citation_count) &&
     JSON.parse(r.citations_json || '[]').length < r.reported_citation_count).length;
   const searchGaps = successful.filter(r => Number.isInteger(r.reported_search_count) &&
     JSON.parse(r.searched_sites_json || '[]').length < r.reported_search_count).length;
   const failed = results.filter(r => r.status === 'failed').length;
-  const pending = Math.max(0, totalExpected - successful.length - failed);
+  const pending = Math.max(0, totalExpected - successful.length - failed - invalid);
   const discovery = successful.filter(r => {
     const question = byId.get(Number(r.question_id));
     return question?.kind === 'discovery' && !brandMentioned(question.text, brand);
@@ -55,10 +58,11 @@ export function summarizeRun({ brand, questions, results, totalExpected = result
     const key = result.account_id ? String(result.account_id) : result.platform + ':default';
     if (!accounts.has(key)) accounts.set(key, {
       platform: result.platform, label: result.account_label || '默认账号',
-      successful: 0, failed: 0, pending: 0, discoveryTotal: 0, discoveryMentions: 0,
+      successful: 0, failed: 0, pending: 0, invalid: 0, discoveryTotal: 0, discoveryMentions: 0,
     });
     const group = accounts.get(key);
-    if (result.status === 'succeeded') {
+    if (result.status === 'succeeded' && !usable(result)) group.invalid++;
+    else if (result.status === 'succeeded') {
       group.successful++;
       const question = byId.get(Number(result.question_id));
       if (question?.kind === 'discovery' && !brandMentioned(question.text, brand)) {
@@ -72,7 +76,8 @@ export function summarizeRun({ brand, questions, results, totalExpected = result
     const guess = sentimentGuess(result.answer, brand);
     if (guess in sentiment) sentiment[guess]++;
     for (const citation of JSON.parse(result.citations_json || '[]')) {
-      const host = citationHost(citation.url);
+      let host=null;
+      try { if(['http:','https:'].includes(new URL(citation.url).protocol)) host=citationHost(citation.url); } catch {}
       if (host) hosts.set(host, (hosts.get(host) ?? 0) + 1);
     }
   }
@@ -80,11 +85,14 @@ export function summarizeRun({ brand, questions, results, totalExpected = result
     total: totalExpected,
     successful: successful.length,
     failed,
+    invalid,
     pending,
-    captureRate: totalExpected ? successful.length / totalExpected : null,
+    captureRate: totalExpected && results.length<=totalExpected ? successful.length / totalExpected : null,
     citationGaps,
     searchGaps,
     qualityWarnings: [
+      ...(invalid ? ['有 ' + invalid + ' 条成功记录正文为空或归属重复，未纳入有效回答。'] : []),
+      ...(results.length>totalExpected ? ['保存记录超过预期数量，暂不计算采集覆盖率。'] : []),
       ...(pending ? ['还有 ' + pending + ' 条待处理或未执行，当前报告不是完整批次。'] : []),
       ...(failed ? ['有 ' + failed + ' 条采集失败，提及率只统计成功回答，可能与完整批次不同。'] : []),
       ...(citationGaps ? ['有 ' + citationGaps + ' 条回答展示的参考资料数多于已取得链接，请核对网页截图。'] : []),

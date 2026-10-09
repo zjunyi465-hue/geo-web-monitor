@@ -87,7 +87,7 @@ try {
   await page.locator('#runTaskForm input[name="account"]').first().check();
   await label();
   await page.locator('#runTaskPanel').screenshot({ path: join(output, 'run-selection.png') });
-  await page.getByRole('button', { name: '结果与报告', exact: true }).click();
+  await page.getByRole('button', { name: '采集结果', exact: true }).click();
   await page.locator('button[data-action="viewRun"]').first().click();
   await page.getByText('按账号比较', { exact: true }).waitFor();
   await page.locator('main details > summary').filter({ hasText: texts[0] }).first().click();

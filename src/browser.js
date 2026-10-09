@@ -2,6 +2,8 @@ import { chromium } from 'playwright';
 import { mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { captureForeground, placeBrowserWindow } from './window-control.js';
+import {readMonitorConditions} from './monitor-conditions.js';
+import {collectMessageSources} from './message-sources.js';
 
 // UI selectors are intentionally isolated here. They require verification with
 // an actual logged-in account and will need updates when a provider changes UI.
@@ -87,10 +89,113 @@ async function withAccountLock(key, action) {
   const prior = locks.get(key) ?? Promise.resolve();
   let release;
   const gate = new Promise(resolveGate => { release = resolveGate; });
-  locks.set(key, prior.then(() => gate));
+  const queued = prior.then(() => gate);
+  locks.set(key, queued);
   await prior;
   try { return await action(); }
-  finally { release(); }
+  finally { release(); if (locks.get(key) === queued) locks.delete(key); }
+}
+
+export function accountBrowserBusy(account) {
+  return locks.has(account.platform + ':' + account.id);
+}
+
+// Conservative checks: a usable editor alone does not establish authentication.
+export async function inspectAccountLogin(page, platform) {
+  try {
+    await checkHumanVerification(page);
+    await checkPlatformRestriction(page);
+  } catch (error) {
+    if (error.code === 'LOGIN_REQUIRED') return { status: 'login_required', reason: '页面显示登录入口或登录表单。' };
+    if (error.code === 'HUMAN_VERIFICATION_REQUIRED') return { status: 'verification_required', reason: '页面要求人工验证。' };
+    if (error.code === 'REGION_RESTRICTED') return { status: 'unconfirmed', reason: '页面提示地区限制，不能据此判断登录是否失效。' };
+    throw error;
+  }
+  if (new URL(page.url()).hostname !== new URL(PLATFORMS[platform].url).hostname) {
+    return { status: 'unconfirmed', reason: '页面未到达对应平台，无法确认登录状态。' };
+  }
+  if (await page.getByRole('link', { name: /^(登录|立即登录|Sign in|Log in)$/i }).filter({ visible: true }).first().isVisible().catch(() => false)) {
+    return { status: 'login_required', reason: '页面显示登录入口。' };
+  }
+  if (await page.getByText(/受区域限制|当前地区暂不支持/).filter({ visible: true }).first().isVisible().catch(() => false)) {
+    return { status: 'unconfirmed', reason: '页面提示地区限制，不能据此判断登录是否失效。' };
+  }
+  const input = await firstVisible(page, PLATFORMS[platform].input, 500);
+  const usable = input && await input.isEditable().catch(() => false) &&
+    !await input.evaluate(node => Boolean(node.closest('[aria-busy="true"]'))).catch(() => true);
+  const identity = await page.getByText(/^(?:1\d{2}\*{3,8}\d{2,4}|退出登录|退出账号|Log out|Sign out)$/i)
+    .filter({ visible: true }).first().isVisible().catch(() => false);
+  const accountControl = await page.getByRole('button', { name: /^(个人中心|账号设置|账户设置|My account|Account settings)$/i })
+    .filter({ visible: true }).first().isVisible().catch(() => false);
+  let sidebarIdentity = false;
+  if (platform === 'doubao') {
+    // The default nickname is shown in the bottom-left account control, not
+    // necessarily exposed as a button or a masked phone number.
+    for (const item of await page.getByText(/^用户\d+$/, { exact: true }).all().catch(() => [])) {
+      if (!await item.isVisible().catch(() => false)) continue;
+      const box = await item.boundingBox().catch(() => null);
+      const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+      if (box && box.x < viewport.width * 0.35 && box.y > viewport.height * 0.65) sidebarIdentity = true;
+    }
+  }
+  if (usable && (identity || accountControl || sidebarIdentity)) return { status: 'valid', reason: '页面同时显示账号身份标识和可编辑的问答输入框；未发送问题。' };
+  return { status: 'unconfirmed', reason: usable ? '输入框可用，但没有识别到可靠的已登录标识，不能仅凭输入框确认。' : '尚未同时识别到已登录标识和可用输入框；可能是加载或页面识别问题。' };
+}
+
+export async function waitForAccountLogin(page, platform, { timeoutMs = 60000 } = {}) {
+  const started = Date.now();
+  let result;
+  let stableStatus;
+  let stableSince = 0;
+  while (Date.now() - started < timeoutMs) {
+    result = await inspectAccountLogin(page, platform);
+    const terminal = result.status !== 'unconfirmed' || result.reason.includes('地区限制');
+    const signature = terminal ? result.status + ':' + result.reason : null;
+    if (signature !== stableStatus) { stableStatus = signature; stableSince = Date.now(); }
+    // Allow auth restoration and editor hydration to settle before accepting
+    // a briefly visible login prompt or a partially rendered editor.
+    if (terminal && Date.now() - stableSince >= 1500) return { ...result, elapsedMs: Date.now() - started };
+    await page.waitForTimeout(500);
+  }
+  return { ...result, status: 'unconfirmed', elapsedMs: Date.now() - started,
+    reason: '检查等待达到上限，页面仍未满足确认条件；这不代表登录失效。' + (result?.reason || '') };
+}
+
+export async function checkAccountLogin(account, options = {}) {
+  if (accountBrowserBusy(account)) {
+    const error = new Error('账号正在使用中，请结束监测或登录操作后再检查。');
+    error.code = 'ACCOUNT_BUSY'; throw error;
+  }
+  return withAccountLock(account.platform + ':' + account.id, async () => {
+    let page;
+    let result;
+    let screenshot = null;
+    try {
+      const context = await contextFor(account.platform, account.id, account.profile_key);
+      page = await context.newPage();
+      let navigationTimedOut = false;
+      try {
+        await page.goto(PLATFORMS[account.platform].url, { waitUntil: 'domcontentloaded', timeout: options.navigationTimeoutMs ?? 20000 });
+      } catch (error) {
+        if (error.name !== 'TimeoutError') throw error;
+        // A navigation timeout does not stop the SPA from rendering afterward.
+        navigationTimedOut = true;
+      }
+      result = { ...await waitForAccountLogin(page, account.platform, options), navigationTimedOut };
+    } catch {
+      result = { status: 'unconfirmed', reason: '浏览器启动或网页加载未完成，请检查网络、浏览器窗口后再试。' };
+    } finally {
+      if (page && !page.isClosed()) {
+        if (result?.status !== 'valid') {
+          const folder = resolve(process.env.GEO_RESULTS_ROOT || 'results', 'account-checks');
+          const name = 'account-' + account.id + '-' + Date.now() + '.png';
+          try { await mkdir(folder, { recursive: true }); await page.screenshot({ path: join(folder, name) }); screenshot = '/account-check-screenshots/' + name; } catch {}
+        }
+        await page.close().catch(() => {});
+      }
+    }
+    return { ...result, screenshot, checkedAt: new Date().toISOString() };
+  });
 }
 
 async function showAttentionWindow(job, url) {
@@ -171,6 +276,16 @@ async function waitForAnswer(page, selectors, beforeText, timeout = 120000, comp
   throw error;
 }
 
+export async function expandDoubaoSources(message) {
+  const summary=message.getByText(/搜索\s*\d+\s*个关键词，参考\s*\d+\s*篇资料/).first();
+  if(!await summary.count()) return null;
+  const count=Number((await summary.innerText()).match(/参考\s*(\d+)\s*篇资料/)?.[1]||0);
+  const referencesVisible=await message.locator('a[href]').evaluateAll(nodes=>nodes.some(a=>
+    a.getClientRects().length>0&&/^\s*\d{1,4}[.．、]\s*/.test(a.textContent||'')));
+  if(await summary.getAttribute('aria-expanded')!=='true'&&!referencesVisible) await summary.click();
+  return count;
+}
+
 export async function readAnswer(page, platform, beforeText = '', authFailures = [], onPoll = () => {}) {
   const config = PLATFORMS[platform];
   const answer = await waitForAnswer(page, config.answer, beforeText, 120000, config.completed, authFailures, onPoll);
@@ -182,23 +297,16 @@ export async function readAnswer(page, platform, beforeText = '', authFailures =
     ? answer.locator('xpath=ancestor::*[@data-testid="receive_message"][1]')
     : answer;
   if (platform === 'doubao') {
-    const summary = assistantMessage.getByText(/搜索\s*\d+\s*个关键词，参考\s*\d+\s*篇资料/).first();
-    if (await summary.count()) {
-      reportedCitationCount = Number((await summary.innerText()).match(/参考\s*(\d+)\s*篇资料/)?.[1] || 0);
-      await summary.click();
+    reportedCitationCount=await expandDoubaoSources(assistantMessage);
       if (reportedCitationCount > 0) {
         await page.waitForFunction(() => {
           const message = [...document.querySelectorAll('[data-testid="receive_message"]')].at(-1);
           return message?.querySelector('a[href]') !== null;
         }, null, { timeout: 5000 }).catch(() => {});
       }
-    }
   }
-  const links = await assistantMessage.locator('a[href]').evaluateAll(nodes =>
-    nodes.filter(node => node.getClientRects().length > 0)
-      .map(node => ({ title: (node.textContent || '').trim(), url: node.href }))
-      .filter(item => /^https?:/.test(item.url)));
-  return { text, citations: [...new Map(links.map(item => [item.url, item])).values()], reportedCitationCount };
+  const sources=await collectMessageSources(page,assistantMessage,reportedCitationCount);
+  return { text, ...sources, reportedCitationCount };
 }
 
 export async function extractDeepSeekAnswer(page, answer) {
@@ -440,17 +548,30 @@ async function askUnlocked(job, { runId, onCheckpoint = () => {} }) {
   const config = PLATFORMS[job.platform];
   const captureId = Date.now();
   const context = await contextFor(job.platform, job.account_id || 0, job.profile_key || 'legacy-' + job.platform);
-  const existingPage = context.pages().find(candidate => !candidate.isClosed());
+  const pages = context.pages().filter(candidate => !candidate.isClosed());
+  let existingPage = pages[0];
+  if (job.resumeState?.mayHaveSubmitted) {
+    const tracked = [];
+    for (const candidate of pages) {
+      if (await candidate.evaluate(token => Boolean(token) && window.__geoMonitorSubmissionToken === token, job.resumeState.token).catch(() => false)) tracked.push(candidate);
+    }
+    if (tracked.length > 1) {
+      const error = new Error('多个标签页携带同一问答检查点，无法唯一确认原对话。本次未重复发送。');
+      error.code = 'RESUME_CONTEXT_LOST'; throw error;
+    }
+    existingPage = tracked[0] || pages.find(candidate => candidate.url() === job.resumeState.pageUrl) || existingPage;
+  }
   const page = existingPage || await context.newPage();
   const authFailures = [];
   const networkFailures = [];
   let stage = '打开网页';
   let checkpoint = job.resumeState || null;
+  let originalConfirmed = false;
   const persistCheckpoint = () => {
     if (!checkpoint) return;
     // Keep the last useful conversation URL if the window was replaced.
     const url = page.url();
-    if (/^https?:/.test(url) && !job.resumeState) checkpoint.pageUrl = url;
+    if (/^https?:/.test(url) && (!job.resumeState || originalConfirmed)) checkpoint.pageUrl = url;
     return onCheckpoint({ ...checkpoint });
   };
   const onRequestFailed = request => {
@@ -481,18 +602,25 @@ async function askUnlocked(job, { runId, onCheckpoint = () => {} }) {
       // Verification may let the provider finish the original submitted question.
       // Resume that document rather than navigating away and sending it again.
       let sameDocument = await page.evaluate(token => Boolean(token) && window.__geoMonitorSubmissionToken === token, checkpoint.token).catch(() => false);
+      if (sameDocument) {
+        await checkHumanVerification(page);
+        await checkLoginRequired(page);
+        await assertOriginalAnswer(page, job.platform, job.question);
+        originalConfirmed = true;
+        await persistCheckpoint();
+      }
       if (checkpoint.legacyRecovery && page.url() === checkpoint.pageUrl) {
         sameDocument = await page.getByText(job.question, { exact: true }).evaluateAll(nodes => nodes.some(node =>
           node.getClientRects().length > 0 && !node.closest('[contenteditable="true"],textarea,input'))).catch(() => false);
       }
       const pausedConversation = checkpoint.pageUrl && !/\/chat\/?(?:[?#].*)?$/.test(checkpoint.pageUrl);
-      const changedConversation = pausedConversation && page.url() !== checkpoint.pageUrl;
+      const changedConversation = pausedConversation && page.url() !== checkpoint.pageUrl && !sameDocument;
       if (!sameDocument || changedConversation) {
         let savedUrl;
         try { savedUrl = new URL(checkpoint.pageUrl); } catch {}
         const platformUrl = new URL(config.url);
         const canRestore = savedUrl && /^https?:$/.test(savedUrl.protocol) && savedUrl.origin === platformUrl.origin &&
-          savedUrl.pathname !== platformUrl.pathname && /\/chat\/.+/.test(savedUrl.pathname);
+          savedUrl.pathname !== platformUrl.pathname && /\/chat\/.+/.test(savedUrl.pathname) && !/\/chat\/local_[^/]+/.test(savedUrl.pathname);
         if (canRestore) {
           stage = '恢复原对话';
           await page.goto(savedUrl.href, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -505,7 +633,9 @@ async function askUnlocked(job, { runId, onCheckpoint = () => {} }) {
         } else sameDocument = false;
       }
       if (!sameDocument) {
-        const error = new Error('原问答窗口已关闭或页面已切换，无法安全确认原问题是否已回答。本次未重复发送；请核对原对话后再新建一次运行。');
+        const error = new Error(/\/chat\/local_/.test(checkpoint.pageUrl || '')
+          ? '原对话仅保存了豆包临时地址，不能通过此地址恢复；请在对应账号的历史对话中核对原问题。本次未重新打开临时地址，也未重复发送。'
+          : '原问答窗口已关闭或页面已切换，无法安全确认原问题是否已回答。本次未重复发送；请核对原对话后再新建一次运行。');
         error.code = 'RESUME_CONTEXT_LOST';
         throw error;
       }
@@ -513,15 +643,17 @@ async function askUnlocked(job, { runId, onCheckpoint = () => {} }) {
       await checkHumanVerification(page);
       await checkLoginRequired(page);
       const answer = await readAnswer(page, job.platform, checkpoint.beforeText, authFailures, async () => {
-        await persistCheckpoint();
         await assertOriginalAnswer(page, job.platform, job.question);
+        originalConfirmed = true;
+        await persistCheckpoint();
       });
       const screenshotDir = resolve(process.env.GEO_RESULTS_ROOT || 'results', 'screenshots', String(runId));
       await mkdir(screenshotDir, { recursive: true });
       const screenshot = join(screenshotDir, String(job.question_id) + '-' + job.platform + '-account-' + (job.account_id || 0) + '-' + captureId + '.png');
       await page.screenshot({ path: screenshot, fullPage: true });
       return { ...answer, screenshot, captureMethod: 'web_ui',
-        diagnostics: { ...await pageDiagnostics(page, config, job.question, '原回答采集完成', networkFailures), resumedOriginal: true } };
+        diagnostics: { ...await pageDiagnostics(page, config, job.question, '原回答采集完成', networkFailures), resumedOriginal: true,
+          monitorConditions:checkpoint.monitorConditions||null,conditionsAfter:await readMonitorConditions(page,job.platform),sourceCollection:answer.sourceCollection||null } };
     }
     await page.goto(config.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await dismissNonBlockingDialogs(page);
@@ -544,6 +676,7 @@ async function askUnlocked(job, { runId, onCheckpoint = () => {} }) {
     const input = await fillQuestion(page, config.input, job.question, 30000, job.platform);
     stage = '提交问题';
     await submitQuestion(page, config, input, job.question, async () => {
+      if(!checkpoint.mayHaveSubmitted) checkpoint.monitorConditions=await readMonitorConditions(page,job.platform);
       checkpoint.mayHaveSubmitted = true;
       await persistCheckpoint(); // Must complete before any send click or Enter.
     });
@@ -555,8 +688,13 @@ async function askUnlocked(job, { runId, onCheckpoint = () => {} }) {
     const screenshot = join(screenshotDir, String(job.question_id) + '-' + job.platform + '-account-' + (job.account_id || 0) + '-' + captureId + '.png');
     await page.screenshot({ path: screenshot, fullPage: true });
     return { ...answer, screenshot, captureMethod: 'web_ui',
-      diagnostics: await pageDiagnostics(page, config, job.question, '采集完成', networkFailures) };
+      diagnostics: {...await pageDiagnostics(page, config, job.question, '采集完成', networkFailures),
+        monitorConditions:checkpoint.monitorConditions||null,conditionsAfter:await readMonitorConditions(page,job.platform),sourceCollection:answer.sourceCollection||null} };
   } catch (error) {
+    if (page.isClosed()) {
+      error = new Error('采集浏览器或问答标签页已关闭，当前问答已中断。以后不想看窗口时请最小化；可点击“重试失败项”新建对话重新提问。');
+      error.code = 'BROWSER_CLOSED';
+    }
     if (!['LOGIN_REQUIRED', 'HUMAN_VERIFICATION_REQUIRED'].includes(error?.code)) {
       try { await checkLoginRequired(page); await checkHumanVerification(page); }
       catch (attention) { error = attention; }
@@ -565,6 +703,7 @@ async function askUnlocked(job, { runId, onCheckpoint = () => {} }) {
       if (checkpoint?.mayHaveSubmitted) await persistCheckpoint();
       error.diagnostics = await pageDiagnostics(page, config, job.question, stage, networkFailures).catch(() => ({ stage }));
       if (checkpoint) {
+        error.diagnostics.monitorConditions=checkpoint.monitorConditions||null;
         error.diagnostics.resumeState = { ...checkpoint, pageUrl: job.resumeState ? checkpoint.pageUrl : page.url() };
       }
       const home = await page.getByText(/有什么我能帮你的吗/).first().isVisible().catch(() => false);
@@ -600,9 +739,11 @@ export async function askBrowser(job, options) {
     for (let attempt = 0; attempt < 2; attempt++) {
       const startedAt = new Date().toISOString();
       try {
-        return { ...await askUnlocked(job, options), attemptStartedAt: startedAt };
+        const answer = await askUnlocked(job, options);
+        return { ...answer, diagnostics: { ...answer.diagnostics, ...(job.retryMode ? { retryMode: job.retryMode } : {}) }, attemptStartedAt: startedAt };
       } catch (error) {
         error.attemptStartedAt = startedAt;
+        if (job.retryMode) error.diagnostics = { ...error.diagnostics, retryMode: job.retryMode };
         if (attempt || !error.safeToRetry) throw error;
         if (options.onAttempt) await options.onAttempt({ ...job, status: 'failed', startedAt,
           finishedAt: new Date().toISOString(), error: error.message, errorCode: error.code,

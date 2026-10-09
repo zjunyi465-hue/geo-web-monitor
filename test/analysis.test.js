@@ -3,6 +3,20 @@ import assert from 'node:assert/strict';
 import { generateQuestions } from '../src/questions.js';
 import { summarizeRun, sentimentGuess } from '../src/analysis.js';
 
+test('单批报告排除空正文成功记录及非网页来源，预期数量冲突不算覆盖率',()=>{
+  const input={brand:{name:'星河'},questions:[{id:1,text:'哪些工具好？',kind:'discovery'}],results:[
+    {question_id:1,account_id:1,status:'succeeded',answer:' ',citations_json:'[]'},
+    {question_id:1,account_id:2,status:'succeeded',answer:'星河',citations_json:'[{"url":"ftp://other.example.org/a"}]'}],totalExpected:2};
+  const r=summarizeRun(input);
+  assert.equal(r.successful,1);assert.equal(r.invalid,1);assert.equal(r.pending,0);
+  assert.equal(r.discoveryTotal,1);assert.equal(r.captureRate,.5);
+  assert.equal(r.byAccount[0].invalid,1);assert.equal(r.topCitationHosts.length,0);
+  assert.equal(summarizeRun({...input,totalExpected:1}).captureRate,null);
+  const duplicate=summarizeRun({...input,results:[input.results[1],{...input.results[1]}]});
+  assert.equal(duplicate.successful,0);assert.equal(duplicate.invalid,2);
+  assert.equal(duplicate.discoveryMentionRate,null);
+});
+
 test('自动生成品牌认知和无品牌名的推荐问题', () => {
   const items = generateQuestions({ name: '星河', category: '数据分析工具', audience: '小型企业' });
   assert.ok(items.some(x => x.kind === 'brand'));
